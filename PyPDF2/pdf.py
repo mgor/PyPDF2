@@ -84,6 +84,7 @@ class PdfFileWriter(object):
     def __init__(self):
         self._header = b_("%PDF-1.3")
         self._objects = []  # array of indirect objects
+        self._attachments = []
 
         # The root of our page tree node.
         pages = DictionaryObject()
@@ -244,17 +245,20 @@ class PdfFileWriter(object):
                 NameObject("/Names"): js_name_tree
                 })
 
-    def addAttachment(self, fname, fdata):
+    def addAttachment(self, fname, fdata, fdescription=None):
         """
         Embed a file inside the PDF.
 
         :param str fname: The filename to display.
         :param str fdata: The data in the file.
+        :param str fdescription: Optional description of the file.
       
         Reference:
         https://www.adobe.com/content/dam/Adobe/en/devnet/acrobat/pdfs/PDF32000_2008.pdf
         Section 7.11.3
         """
+        self._attachments.append({'name': fname, 'data': fdata, 'description': fdescription})
+        embeddedFilesNames = []
         
         # We need 3 entries:
         # * The file's data
@@ -263,41 +267,47 @@ class PdfFileWriter(object):
         
 
         # The entry for the file
-        """ Sample:
-        8 0 obj
-        <<
-         /Length 12
-         /Type /EmbeddedFile
-        >>
-        stream
-        Hello world!
-        endstream
-        endobj        
-        """
-        file_entry = DecodedStreamObject()
-        file_entry.setData(fdata)
-        file_entry.update({
-                NameObject("/Type"): NameObject("/EmbeddedFile")
-                })
+        for attachment in self._attachments:
+            """ Sample:
+            8 0 obj
+            <<
+            /Length 12
+            /Type /EmbeddedFile
+            >>
+            stream
+            Hello world!
+            endstream
+            endobj        
+            """
+            file_entry = DecodedStreamObject()
+            file_entry.setData(attachment['data'])
+            file_entry.update({
+                    NameObject("/Type"): NameObject("/EmbeddedFile")
+                    })
 
-        # The Filespec entry
-        """ Sample:
-        7 0 obj
-        <<
-         /Type /Filespec
-         /F (hello.txt)
-         /EF << /F 8 0 R >>
-        >>
-        """
-        efEntry = DictionaryObject()
-        efEntry.update({ NameObject("/F"):file_entry })
-        
-        filespec = DictionaryObject()
-        filespec.update({
-                NameObject("/Type"): NameObject("/Filespec"),
-                NameObject("/F"): createStringObject(fname),  # Perhaps also try TextStringObject
-                NameObject("/EF"): efEntry
-                })
+            # The Filespec entry
+            """ Sample:
+            7 0 obj
+            <<
+            /Type /Filespec
+            /F (hello.txt)
+            /Desc (a description of the file)
+            /EF << /F 8 0 R >>
+            >>
+            """
+            efEntry = DictionaryObject()
+            efEntry.update({ NameObject("/F"):file_entry })
+
+            filespec = DictionaryObject()
+            filespec.update({
+                    NameObject("/Type"): NameObject("/Filespec"),
+                    NameObject("/F"): createStringObject(attachment['name']),  # Perhaps also try TextStringObject
+                    NameObject("/EF"): efEntry
+                    })
+            if attachment['description'] is not None:
+                filespec.update({ NameObject("/Desc"): createStringObject(attachment['description']) })
+
+            embeddedFilesNames.extend([createStringObject(attachment['name']), filespec])
                 
         # Then create the entry for the root, as it needs a reference to the Filespec
         """ Sample:
@@ -313,7 +323,7 @@ class PdfFileWriter(object):
         """
         embeddedFilesNamesDictionary = DictionaryObject()
         embeddedFilesNamesDictionary.update({
-                NameObject("/Names"): ArrayObject([createStringObject(fname), filespec])
+                NameObject("/Names"): ArrayObject(embeddedFilesNames)
                 })
         
         embeddedFilesDictionary = DictionaryObject()
@@ -1190,6 +1200,50 @@ class PdfFileReader(object):
     """
     Read-only property that accesses the
     :meth:`getXmpMetadata()<PdfFileReader.getXmpMetadata>` function.
+    """
+
+    # This is an implementation of https://github.com/mstamy2/PyPDF2/pull/440 done by
+    # https://github.com/kevinl95
+    def getAttachments(self):
+        """
+        Get all the attachments in this PDF file.
+
+        :return: A dictionary where each key is a file name, and each
+            value is a dict with keys ``data`` and ``description``.
+        :rtype: dict, or ``None`` if no attachments could be located.
+        """
+        if self.isEncrypted:
+            try:
+                self.decrypt('')
+            except:
+                raise utils.PdfReadError("File has not been decrypted")
+            finally:
+                self._override_encryption = False
+
+        try:
+            fileNames = self.trailer["/Root"]["/Names"]["/EmbeddedFiles"]["/Names"]
+
+            attachments = {}
+            for index, fileName in enumerate(fileNames, 1):
+                if isinstance(fileName, utils.string_type):
+                    fname = fileName
+                    fdict = fileNames[index].getObject()
+                    fdata = fdict["/EF"]["/F"].getData()
+                    try: 
+                        fdescription = fdict["/Desc"]
+                    except KeyError as e:
+                        fdescription = None
+
+                    attachments[fname] = {'data': fdata, 'description': fdescription}
+
+            return attachments
+        except KeyError:
+            return None
+
+    attachments = property(lambda self: self.getAttachments(), None, None)
+    """
+    Read-only property that accesses the
+    :meth:`getAttachments()<PdfFileReader.getAttachments>` function
     """
 
     def getNumPages(self):
